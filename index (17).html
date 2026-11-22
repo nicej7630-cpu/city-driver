@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+<title>City Courier</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:#0E1116;color:#fff;font-family:Arial,sans-serif;overflow:hidden;touch-action:none;user-select:none}
+#wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{background:#2B2F36;max-width:100%;max-height:100%;width:auto;height:auto;border-radius:10px;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+#hud{position:fixed;top:10px;left:12px;right:12px;display:flex;justify-content:space-between;gap:8px;font-weight:700;font-size:14px;pointer-events:none;text-shadow:0 1px 3px #000}
+#hud .box{background:rgba(0,0,0,.45);padding:6px 10px;border-radius:8px}
+.screen{position:fixed;inset:0;background:rgba(8,10,14,.82);display:flex;align-items:center;justify-content:center;padding:20px}
+.card{background:#14181F;border:1px solid #2A3442;border-radius:18px;padding:24px;max-width:460px;width:100%;text-align:center;line-height:1.5}
+.card h1{font-size:30px;margin-bottom:6px;letter-spacing:.5px}
+.card h1 span{color:#FF7A1A}
+.card p{color:#C9D2DC;font-size:15px;margin:10px 0}
+.card .big{font-size:34px;font-weight:800;color:#FFB020;margin:8px 0}
+.card button{margin-top:14px;background:#FF7A1A;color:#fff;border:0;padding:12px 26px;border-radius:999px;font-weight:700;font-size:16px;cursor:pointer}
+.hidden{display:none !important}
+#pad{position:fixed;bottom:14px;left:0;right:0;display:none;justify-content:space-between;padding:0 16px;pointer-events:none}
+#pad .side{display:flex;gap:12px;pointer-events:auto}
+#pad button{width:76px;height:76px;border-radius:50%;border:0;background:rgba(255,255,255,.18);color:#fff;font-size:26px;font-weight:700}
+#pad button:active{background:rgba(255,255,255,.35)}
+@media(pointer:coarse){#pad{display:flex}}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="800" height="500"></canvas></div>
+<div id="hud"><div class="box" id="hScore">Coins: 0</div><div class="box" id="hMission">Mission</div><div class="box" id="hTime">60s</div></div>
+
+<div id="title" class="screen">
+  <div class="card">
+    <h1>City <span>Courier</span></h1>
+    <p>Collect parcels from the yellow marks and deliver them to the green marks before time runs out.</p>
+    <p>Avoid the traffic. Five deliveries make one shift.</p>
+    <p>Best score: <b id="tBest">0</b></p>
+    <button onclick="startShift()">Start shift</button>
+  </div>
+</div>
+
+<div id="summary" class="screen hidden">
+  <div class="card">
+    <h1>Shift <span>complete</span></h1>
+    <p>You delivered 5 parcels.</p>
+    <div class="big" id="sCoins">0 coins</div>
+    <p id="sNote"></p>
+    <button onclick="startShift()">Play again</button>
+  </div>
+</div>
+
+<div id="pad">
+  <div class="side"><button id="bL">◀</button><button id="bR">▶</button></div>
+  <div class="side"><button id="bB">■</button><button id="bG">▲</button></div>
+</div>
+
+<script>
+// ---- original city (no real brands or maps) ----
+const TILE = 40, COLS = 40, ROWS = 28, W = 800, H = 500;
+const isRoad = (c, r) => c % 5 === 0 || r % 4 === 0;
+const city = [];
+for(let r = 0; r < ROWS; r++){ city[r] = []; for(let c = 0; c < COLS; c++){
+  city[r][c] = isRoad(c, r) ? 0 : ((c * 7 + r * 13) % 5) + 1;
+} }
+const palette = ['#7C8B9A','#A1866F','#8FA37C','#B07A9A','#6F8FB0'];
+const carColours = ['#E8C547','#3CB371','#5DADE2','#F5F5F5','#E67E22'];
+
+// ---- player ----
+const car = { x: 2.5*TILE, y: 2.5*TILE, a: 0, v: 0 };
+const keys = {}; const touch = {L:false,R:false,G:false,B:false};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if(e.key === ' ') e.preventDefault(); });
+addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+function bindBtn(id, k){
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); touch[k] = true; }, off = e => { e.preventDefault(); touch[k] = false; };
+  el.addEventListener('pointerdown', on); el.addEventListener('pointerup', off);
+  el.addEventListener('pointercancel', off); el.addEventListener('pointerleave', off);
+}
+bindBtn('bL','L'); bindBtn('bR','R'); bindBtn('bG','G'); bindBtn('bB','B');
+
+// ---- traffic: cars driving along the horizontal roads ----
+let traffic = [];
+function makeTraffic(){
+  traffic = [];
+  for(let r = 0; r < ROWS; r++){
+    if(r % 4 !== 0) continue;
+    for(let i = 0; i < 2; i++){
+      traffic.push({ y: (r + 0.5) * TILE + (i ? 8 : -8), x: Math.random() * COLS * TILE,
+        dir: (r + i) % 2 ? 1 : -1, speed: 50 + Math.random() * 40, col: carColours[(r + i) % carColours.length] });
+    }
+  }
+}
+
+// ---- sound (simple beeps, no files needed) ----
+let audioCtx = null;
+function beep(freq, dur){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination); o.frequency.value = freq; g.gain.value = 0.12;
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  }catch(e){}
+}
+
+// ---- game state ----
+let coins = 0, deliveries = 0, mission = null, timeLeft = 60, running = false, flash = 0, stun = 0, lastT = performance.now();
+const MAX_DELIVERIES = 5;
+let best = parseInt(localStorage.getItem('courierBest') || '0', 10) || 0;
+document.getElementById('tBest').textContent = best;
+
+function randomRoad(){
+  while(true){
+    const c = Math.floor(Math.random()*COLS), r = Math.floor(Math.random()*ROWS);
+    if(isRoad(c, r) && Math.hypot(c - car.x/TILE, r - car.y/TILE) > 6) return { x: (c+0.5)*TILE, y: (r+0.5)*TILE };
+  }
+}
+function newMission(){
+  mission = { stage: 'pickup', pick: randomRoad(), drop: randomRoad(), label: 'Collect the parcel (yellow)' };
+  timeLeft = 60;
+}
+function startShift(){
+  coins = 0; deliveries = 0; car.x = 2.5*TILE; car.y = 2.5*TILE; car.a = 0; car.v = 0; stun = 0;
+  makeTraffic(); newMission(); running = true;
+  document.getElementById('title').classList.add('hidden');
+  document.getElementById('summary').classList.add('hidden');
+}
+function endShift(){
+  running = false;
+  if(coins > best){ best = coins; localStorage.setItem('courierBest', String(best)); }
+  document.getElementById('sCoins').textContent = coins + ' coins';
+  document.getElementById('sNote').textContent = coins >= best ? 'New best score!' : 'Best score: ' + best;
+  document.getElementById('summary').classList.remove('hidden');
+  document.getElementById('tBest').textContent = best;
+}
+
+// ---- update ----
+function update(dt){
+  const left = keys['arrowleft'] || keys['a'] || touch.L;
+  const right = keys['arrowright'] || keys['d'] || touch.R;
+  const gas = keys['arrowup'] || keys['w'] || touch.G;
+  const brake = keys['arrowdown'] || keys['s'] || touch.B;
+
+  if(stun > 0) stun -= dt;
+  if(gas && stun <= 0) car.v = Math.min(car.v + 220*dt, 150);
+  else car.v *= (1 - 1.2*dt);
+  if(brake) car.v = Math.max(car.v - 320*dt, -60);
+  if(Math.abs(car.v) > 5){ car.a += ((left ? -1 : 0) + (right ? 1 : 0)) * 2.6 * dt * Math.sign(car.v); }
+
+  const nx = car.x + Math.cos(car.a)*car.v*dt, ny = car.y + Math.sin(car.a)*car.v*dt;
+  const c = Math.floor(nx/TILE), r = Math.floor(ny/TILE);
+  if(c < 0 || r < 0 || c >= COLS || r >= ROWS || city[r][c] !== 0){ car.v *= -0.3; }
+  else { car.x = nx; car.y = ny; }
+
+  // traffic moves and can be hit
+  traffic.forEach(t => {
+    t.x += t.dir * t.speed * dt;
+    if(t.x < -TILE) t.x = COLS*TILE + TILE;
+    if(t.x > COLS*TILE + TILE) t.x = -TILE;
+    if(stun <= 0 && Math.hypot(car.x - t.x, car.y - t.y) < 22){
+      coins = Math.max(0, coins - 5); stun = 0.8; car.v = -40; flash = 0.6; beep(160, 0.2);
+    }
+  });
+
+  timeLeft -= dt;
+  if(timeLeft <= 0){
+    coins = Math.max(0, coins - 20); flash = 1; beep(120, 0.3);
+    if(deliveries >= MAX_DELIVERIES) return endShift();
+    newMission();
+  }
+
+  if(mission){
+    const target = mission.stage === 'pickup' ? mission.pick : mission.drop;
+    if(Math.hypot(car.x - target.x, car.y - target.y) < 26){
+      if(mission.stage === 'pickup'){ mission.stage = 'drop'; mission.label = 'Deliver the parcel (green)'; beep(660, 0.12); }
+      else {
+        deliveries++;
+        coins += 100 + Math.ceil(timeLeft);
+        flash = 1; beep(990, 0.25);
+        if(deliveries >= MAX_DELIVERIES) return endShift();
+        newMission();
+      }
+    }
+  }
+  flash = Math.max(0, flash - dt*2);
+}
+
+// ---- draw ----
+function draw(){
+  const ctx = document.getElementById('c').getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const camX = Math.min(Math.max(car.x - W/2, 0), COLS*TILE - W);
+  const camY = Math.min(Math.max(car.y - H/2, 0), ROWS*TILE - H);
+  ctx.save(); ctx.translate(-camX, -camY);
+
+  for(let r = 0; r < ROWS; r++) for(let c = 0; c < COLS; c++){
+    const x = c*TILE, y = r*TILE;
+    if(city[r][c] === 0){
+      ctx.fillStyle = '#3A3F47'; ctx.fillRect(x, y, TILE, TILE);
+      ctx.strokeStyle = '#E8D27A'; ctx.setLineDash([8,8]); ctx.lineWidth = 2;
+      if(c % 5 === 0 && r % 4 !== 0){ ctx.beginPath(); ctx.moveTo(x+TILE/2, y); ctx.lineTo(x+TILE/2, y+TILE); ctx.stroke(); }
+      if(r % 4 === 0 && c % 5 !== 0){ ctx.beginPath(); ctx.moveTo(x, y+TILE/2); ctx.lineTo(x+TILE, y+TILE/2); ctx.stroke(); }
+      ctx.setLineDash([]);
+    } else {
+      ctx.fillStyle = palette[city[r][c]-1]; ctx.fillRect(x+3, y+3, TILE-6, TILE-6);
+      ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(x+6, y+6, TILE-12, 8);
+    }
+  }
+
+  if(mission){
+    const t = mission.stage === 'pickup' ? mission.pick : mission.drop;
+    const pulse = 10 + Math.sin(performance.now()/180)*4;
+    ctx.beginPath(); ctx.arc(t.x, t.y, pulse, 0, Math.PI*2);
+    ctx.fillStyle = mission.stage === 'pickup' ? 'rgba(255,200,40,.85)' : 'rgba(60,220,120,.85)';
+    ctx.fill();
+  }
+
+  traffic.forEach(t => {
+    ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.dir > 0 ? 0 : Math.PI);
+    ctx.fillStyle = t.col; ctx.fillRect(-13, -8, 26, 16);
+    ctx.fillStyle = '#9DD7F0'; ctx.fillRect(3, -6, 7, 12);
+    ctx.restore();
+  });
+
+  ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(car.a);
+  ctx.fillStyle = stun > 0 ? '#F08080' : '#D9423A'; ctx.fillRect(-14, -9, 28, 18);
+  ctx.fillStyle = '#9DD7F0'; ctx.fillRect(2, -7, 9, 14);
+  ctx.fillStyle = '#222'; ctx.fillRect(-16,-11,5,5); ctx.fillRect(-16,6,5,5); ctx.fillRect(11,-11,5,5); ctx.fillRect(11,6,5,5);
+  ctx.restore();
+  ctx.restore();
+
+  if(flash > 0){ ctx.fillStyle = 'rgba(255,255,255,'+(flash*0.15)+')'; ctx.fillRect(0,0,W,H); }
+}
+
+function hud(){
+  document.getElementById('hScore').textContent = 'Coins: ' + coins + '  ·  Parcels: ' + deliveries + '/' + MAX_DELIVERIES;
+  document.getElementById('hTime').textContent = Math.max(0, Math.ceil(timeLeft)) + 's';
+  document.getElementById('hMission').textContent = mission ? mission.label : '';
+}
+
+function loop(t){
+  const dt = Math.min(0.05, (t - lastT)/1000); lastT = t;
+  if(running) update(dt);
+  draw(); hud();
+  requestAnimationFrame(loop);
+}
+makeTraffic();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
